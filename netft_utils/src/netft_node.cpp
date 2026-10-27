@@ -50,6 +50,7 @@
 #include <iostream>
 #include <memory>
 #include <std_msgs/msg/bool.hpp>
+#include <std_srvs/srv/trigger.hpp>
 
 namespace po = boost::program_options;
 using namespace std;
@@ -66,7 +67,7 @@ int main(int argc, char ** argv)
   desc.add_options()("--ros-args", "ros arguments")("help", "display help")(
     "rate", po::value<float>(&pub_rate_hz)->default_value(500.0), "set publish rate (in hertz)")(
     "address", po::value<string>(&address), "IP address of NetFT box")(
-    "frame_id", po::value<string>(&frame_id)->default_value("base_link"),
+    "frame_id", po::value<string>(&frame_id)->default_value("ft_sensor_frame"),
     "frame_id for Wrench msgs");
 
   po::positional_options_description p;
@@ -106,10 +107,29 @@ int main(int argc, char ** argv)
     is_ready.data = false;
     ready_pub->publish(is_ready);
     RCLCPP_ERROR_STREAM(node->get_logger(), "Error opening NetFT: " << e.what());
+    rclcpp::shutdown();
+    return EXIT_FAILURE;
   }
 
   rclcpp::Rate pub_rate(pub_rate_hz);
   geometry_msgs::msg::WrenchStamped data;
+  geometry_msgs::msg::Wrench bias;
+  bool has_data = false;
+  // Capture the raw wrench, so repeated resets replace rather than accumulate the bias.
+  auto reset_service = node->create_service<std_srvs::srv::Trigger>(
+    "/reset_ft",
+    [&](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+        std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+      if (!has_data) {
+        response->success = false;
+        response->message = "No fresh sensor sample available; bias unchanged.";
+        return;
+      }
+      bias = data.wrench;
+      response->success = true;
+      response->message = "Force/torque bias captured in " + frame_id;
+      RCLCPP_INFO(node->get_logger(), "%s", response->message.c_str());
+    });
 
   // rclcpp::Duration diag_pub_duration(std::chrono::milliseconds(1000));
   // rclcpp::Publisher diag_pub = netft->create_publisher<diagnostic_msgs::msg::DiagnosticArray>("/diagnostics", 2);
@@ -120,9 +140,17 @@ int main(int argc, char ** argv)
 
   while (rclcpp::ok()) {
     // Publish netft data when data is recieved.
-    if (netft->waitForNewData()) {
+    has_data = netft->waitForNewData();
+    if (has_data) {
       netft->getData(data);
-      geo_pub->publish(data);
+      auto corrected = data;
+      corrected.wrench.force.x -= bias.force.x;
+      corrected.wrench.force.y -= bias.force.y;
+      corrected.wrench.force.z -= bias.force.z;
+      corrected.wrench.torque.x -= bias.torque.x;
+      corrected.wrench.torque.y -= bias.torque.y;
+      corrected.wrench.torque.z -= bias.torque.z;
+      geo_pub->publish(corrected);
     }
 
     // TODO: removed diagnostics for now will implement in the future.

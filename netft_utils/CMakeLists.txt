@@ -14,6 +14,7 @@ ament_cmake
 rclcpp
 rclcpp_lifecycle
 std_msgs
+std_srvs
 common_interfaces
 hardware_interface
 geometry_msgs
